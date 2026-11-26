@@ -1,0 +1,62 @@
+name: Keep the licence server awake
+
+# Render's free tier spins down after 15 idle minutes. The iOS client talks to
+# the licence API with a 30 second timeout and pins TLS, so a cold start can
+# break an activation.
+#
+# This job pings /health every 10 minutes so the service never sleeps.
+# GitHub Actions cron can be delayed under load, so treat this as the Render
+# path only — the Cloudflare Worker path (deploy-worker.yml) is always on and
+# needs no keep-alive at all.
+#
+# Scheduled workflows only run on public repositories and are disabled
+# automatically after 60 days of repository inactivity.
+
+on:
+  schedule:
+    # every 10 minutes
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dolomite-keep-alive
+  cancel-in-progress: false
+
+jobs:
+  ping:
+    name: Ping the licence server
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Health check
+        env:
+          SERVER_URL: ${{ vars.SERVER_URL }}
+        run: |
+          set -euo pipefail
+          if [ -z "${SERVER_URL:-}" ]; then
+            echo "SERVER_URL repository variable is not set — nothing to ping."
+            exit 0
+          fi
+          status=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 "${SERVER_URL}/health" || echo 000)
+          echo "health status: ${status}"
+          if [ "${status}" != "200" ]; then
+            echo "::warning::the licence server did not answer with 200"
+            exit 1
+          fi
+
+      - name: Keep the notice route warm too
+        env:
+          SERVER_URL: ${{ vars.SERVER_URL }}
+        run: |
+          set -euo pipefail
+          if [ -z "${SERVER_URL:-}" ]; then
+            exit 0
+          fi
+          curl -fsS -X POST "${SERVER_URL}/api/v1/dolomite/notice" \
+            -H 'Content-Type: application/json' \
+            -H 'x-dolomite-product: dolomite' \
+            | head -c 200 || true
+          echo
