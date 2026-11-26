@@ -13,6 +13,7 @@ on:
     branches: [main]
     paths:
       - server/**
+      - '*.zip'
       - .github/workflows/deploy-render.yml
 
 permissions:
@@ -39,6 +40,37 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: "22"
+
+      - name: Prepare the server project
+        working-directory: .
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f server/package.json ]; then
+            echo "server/ is already extracted — nothing to do."
+            exit 0
+          fi
+          tmp="$(mktemp -d)"
+          for zip in Dolomite-monorepo.zip dolomite-dashboard.zip; do
+            [ -f "$zip" ] || continue
+            rm -rf "$tmp" && mkdir -p "$tmp"
+            echo "looking for the server inside $zip"
+            unzip -q "$zip" -d "$tmp" || continue
+            found="$(find "$tmp" -maxdepth 4 -name server.js -type f -print -quit)"
+            if [ -n "$found" ]; then
+              srcdir="$(dirname "$found")"
+              mkdir -p server
+              cp -R "$srcdir"/. server/
+              rm -rf "$tmp"
+              echo "::notice::extracted server/ from $zip"
+              exit 0
+            fi
+          done
+          echo "::error::No server project found."
+          echo "::error::Expected server/package.json, or one of: Dolomite-monorepo.zip, dolomite-dashboard.zip"
+          echo "--- repository root ---"
+          ls -la
+          exit 1
 
       - name: Verify the project layout
         shell: bash
