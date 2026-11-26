@@ -1,5 +1,9 @@
 name: Deploy licence server (Cloudflare Worker)
 
+# The server lives in server/. Every `run:` step works inside that folder
+# (see `defaults.run.working-directory`), so `npm test` and `wrangler deploy`
+# find the project root.
+
 on:
   workflow_dispatch:
     inputs:
@@ -10,11 +14,7 @@ on:
   push:
     branches: [main]
     paths:
-      - worker/**
-      - lib/**
-      - public/**
-      - server.js
-      - package.json
+      - server/**
       - .github/workflows/deploy-worker.yml
 
 permissions:
@@ -23,6 +23,10 @@ permissions:
 concurrency:
   group: dolomite-worker-deploy
   cancel-in-progress: true
+
+defaults:
+  run:
+    working-directory: server
 
 jobs:
   deploy:
@@ -37,6 +41,30 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: "22"
+
+      - name: Verify the project layout
+        shell: bash
+        run: |
+          set -uo pipefail
+          missing=0
+          for path in package.json server.js lib public worker test; do
+            if [ ! -e "$path" ]; then
+              echo "::error::missing $path"
+              missing=1
+            fi
+          done
+          if [ "$missing" = "1" ]; then
+            echo "::error::The server is not inside server/. Expected layout:"
+            echo "  server/package.json"
+            echo "  server/server.js"
+            echo "  server/lib/"
+            echo "  server/public/"
+            echo "  server/worker/"
+            echo "--- repository root ---"
+            ls -la
+            exit 1
+          fi
+          echo "layout ok"
 
       - name: Install tooling
         run: npm install --no-save wrangler@4
@@ -54,14 +82,15 @@ jobs:
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        working-directory: worker
         run: |
           set -euo pipefail
+          cd worker
           npx wrangler deploy --minify
 
       - name: Smoke test the live Worker
         env:
           WORKER_URL: ${{ vars.WORKER_URL }}
+        shell: bash
         run: |
           set -euo pipefail
           if [ -z "${WORKER_URL:-}" ]; then
