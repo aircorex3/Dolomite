@@ -3,6 +3,11 @@ name: Build Dolomite External IPA
 # The iOS project lives in ios/. Every `run:` step therefore works inside
 # that folder (see `defaults.run.working-directory` below), while `uses:`
 # steps stay at the repository root — so upload paths are prefixed with ios/.
+#
+# If ios/ is missing but a project archive is present (Dolomite-monorepo.zip
+# or Dolomite-External-iOS.zip), the "Prepare the iOS project" step unpacks
+# it automatically, so the repository works whether it holds the extracted
+# source or just the archives.
 
 on:
   workflow_dispatch:
@@ -19,6 +24,7 @@ on:
     paths:
       - ios/**
       - .github/workflows/build-ipa.yml
+      - '*.zip'
 
 permissions:
   contents: read
@@ -38,6 +44,37 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@v4
+
+      - name: Prepare the iOS project
+        working-directory: .
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -d ios/ThreeOneOSFive ]; then
+            echo "ios/ is already extracted — nothing to do."
+            exit 0
+          fi
+          tmp="$(mktemp -d)"
+          for zip in Dolomite-monorepo.zip Dolomite-External-iOS.zip; do
+            [ -f "$zip" ] || continue
+            rm -rf "$tmp" && mkdir -p "$tmp"
+            echo "looking for the project inside $zip"
+            unzip -q "$zip" -d "$tmp" || continue
+            found="$(find "$tmp" -maxdepth 4 -name ThreeOneOSFive -type d -print -quit)"
+            if [ -n "$found" ]; then
+              srcdir="$(dirname "$found")"
+              mkdir -p ios
+              cp -R "$srcdir"/. ios/
+              rm -rf "$tmp"
+              echo "::notice::extracted ios/ from $zip"
+              exit 0
+            fi
+          done
+          echo "::error::No iOS project found."
+          echo "::error::Expected ios/ThreeOneOSFive, or one of: Dolomite-monorepo.zip, Dolomite-External-iOS.zip"
+          echo "--- repository root ---"
+          ls -la
+          exit 1
 
       - name: Verify the project layout
         shell: bash
