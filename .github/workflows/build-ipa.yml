@@ -1,5 +1,9 @@
 name: Build Dolomite External IPA
 
+# The iOS project lives in ios/. Every `run:` step therefore works inside
+# that folder (see `defaults.run.working-directory` below), while `uses:`
+# steps stay at the repository root — so upload paths are prefixed with ios/.
+
 on:
   workflow_dispatch:
     inputs:
@@ -13,14 +17,15 @@ on:
     # Path filters are not evaluated for tag pushes, so tagging a commit that
     # only touched docs still produces a release build.
     paths:
-      - ThreeOneOSFive/**
-      - ThreeOneOSFive.xcodeproj/**
+      - ios/**
       - .github/workflows/build-ipa.yml
-      - DolomiteLicensing.xcconfig
-      - checks/native/**
 
 permissions:
   contents: read
+
+defaults:
+  run:
+    working-directory: ios
 
 jobs:
   build:
@@ -34,6 +39,37 @@ jobs:
       - name: Check out source
         uses: actions/checkout@v4
 
+      - name: Verify the project layout
+        shell: bash
+        run: |
+          set -uo pipefail
+          missing=0
+          for path in \
+            ThreeOneOSFive \
+            ThreeOneOSFive.xcodeproj \
+            checks/native/check-reflection.test.mjs \
+            checks/native/run.sh \
+            DolomiteLicensing.xcconfig
+          do
+            if [ ! -e "$path" ]; then
+              echo "::error::missing $path"
+              missing=1
+            fi
+          done
+          if [ "$missing" = "1" ]; then
+            echo "::error::The iOS project is not inside ios/. Expected layout:"
+            echo "  ios/ThreeOneOSFive/"
+            echo "  ios/ThreeOneOSFive.xcodeproj/"
+            echo "  ios/checks/native/"
+            echo "  ios/DolomiteLicensing.xcconfig"
+            echo "--- repository root ---"
+            ls -la
+            exit 1
+          fi
+          echo "layout ok"
+          echo "--- ios/ ---"
+          ls -la
+
       - name: Show Xcode version
         run: xcodebuild -version
 
@@ -43,7 +79,7 @@ jobs:
           path: |
             ~/Library/Developer/Xcode/DerivedData
             ~/Library/Caches/org.swift.swiftpm
-          key: dolomite-ios-${{ runner.os }}-${{ hashFiles('ThreeOneOSFive.xcodeproj/**', 'DolomiteLicensing.xcconfig') }}
+          key: dolomite-ios-${{ runner.os }}-${{ hashFiles('ios/ThreeOneOSFive.xcodeproj/**', 'ios/DolomiteLicensing.xcconfig') }}
           restore-keys: dolomite-ios-${{ runner.os }}-
 
       - name: Test release metadata validation
@@ -73,10 +109,15 @@ jobs:
         run: |
           set -uo pipefail
           echo "::group::compiler errors"
-          grep -n "error:" build.log | head -60 || echo "no 'error:' line found"
-          echo "::endgroup::"
-          echo "::group::last 40 lines"
-          tail -40 build.log
+          if [ -f build.log ]; then
+            grep -n "error:" build.log | head -60 || echo "no 'error:' line found"
+            echo "::endgroup::"
+            echo "::group::last 40 lines"
+            tail -40 build.log
+          else
+            echo "no build.log — the compile step never started"
+            echo "::endgroup::"
+          fi
           echo "::endgroup::"
 
       - name: Verify iOS 16 observation metadata in release executable
@@ -117,9 +158,9 @@ jobs:
         with:
           name: dolomiteexternal-unsigned-IPA
           path: |
-            output/dolomiteexternal-unsigned.ipa
-            output/SHA256SUMS.txt
-            build-summary.md
+            ios/output/dolomiteexternal-unsigned.ipa
+            ios/output/SHA256SUMS.txt
+            ios/build-summary.md
           if-no-files-found: error
 
       - name: Upload build log
@@ -127,11 +168,12 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: build-log
-          path: build.log
+          path: ios/build.log
           if-no-files-found: ignore
 
       - name: Write job summary
         if: always()
+        shell: bash
         run: |
           {
             echo "## IPA build"
