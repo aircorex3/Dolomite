@@ -1,0 +1,172 @@
+name: Build Dolomite External IPA
+
+on:
+  workflow_dispatch:
+    inputs:
+      release:
+        description: "Also publish a GitHub release with the IPA"
+        type: boolean
+        default: false
+  push:
+    branches: [main, ipa-build, codex/rebuild-dolomite-mods]
+    tags: ["v*"]
+    # Path filters are not evaluated for tag pushes, so tagging a commit that
+    # only touched docs still produces a release build.
+    paths:
+      - ThreeOneOSFive/**
+      - ThreeOneOSFive.xcodeproj/**
+      - .github/workflows/build-ipa.yml
+      - DolomiteLicensing.xcconfig
+      - checks/native/**
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Compile unsigned IPA
+    runs-on: macos-15
+    timeout-minutes: 30
+    env:
+      APP_NAME: dolomiteexternal
+      SCHEME_TARGET: dolomiteexternal
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Show Xcode version
+        run: xcodebuild -version
+
+      - name: Cache SwiftPM and derived data
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/Library/Developer/Xcode/DerivedData
+            ~/Library/Caches/org.swift.swiftpm
+          key: dolomite-ios-${{ runner.os }}-${{ hashFiles('ThreeOneOSFive.xcodeproj/**', 'DolomiteLicensing.xcconfig') }}
+          restore-keys: dolomite-ios-${{ runner.os }}-
+
+      - name: Test release metadata validation
+        run: node --test checks/native/check-reflection.test.mjs
+
+      - name: Check device identity migration and file recovery
+        run: bash checks/native/run.sh
+
+      - name: Compile for iPhone without signing
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodebuild \
+            -project ThreeOneOSFive.xcodeproj \
+            -target "$SCHEME_TARGET" \
+            -configuration Release \
+            -sdk iphoneos \
+            -xcconfig DolomiteLicensing.xcconfig \
+            ARCHS=arm64 ONLY_ACTIVE_ARCH=NO \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            CONFIGURATION_BUILD_DIR="$PWD/build/Release-iphoneos" \
+            build 2>&1 | tee build.log
+
+      - name: Surface compiler errors
+        if: failure()
+        shell: bash
+        run: |
+          set -uo pipefail
+          echo "::group::compiler errors"
+          grep -n "error:" build.log | head -60 || echo "no 'error:' line found"
+          echo "::endgroup::"
+          echo "::group::last 40 lines"
+          tail -40 build.log
+          echo "::endgroup::"
+
+      - name: Verify iOS 16 observation metadata in release executable
+        shell: bash
+        run: |
+          set -euo pipefail
+          bin="build/Release-iphoneos/${APP_NAME}.app/${APP_NAME}"
+          test -f "$bin"
+          node checks/native/check-reflection.mjs "$bin"
+
+      - name: Package unsigned IPA
+        shell: bash
+        run: |
+          set -euo pipefail
+          app="$PWD/build/Release-iphoneos/${APP_NAME}.app"
+          test -d "$app"
+          test -f "$app/${APP_NAME}"
+          rm -rf output && mkdir -p output/Payload
+          ditto "$app" "output/Payload/${APP_NAME}.app"
+          cd output
+          zip -qry "${APP_NAME}-unsigned.ipa" Payload
+          unzip -t "${APP_NAME}-unsigned.ipa"
+          shasum -a 256 "${APP_NAME}-unsigned.ipa" > SHA256SUMS.txt
+          cd ..
+          {
+            echo "### Dolomite External — unsigned IPA"
+            echo
+            echo "| File | Size | SHA-256 |"
+            echo "| --- | --- | --- |"
+            while read -r hash file; do
+              printf '| `%s` | %s | `%s` |\n' "$file" "$(du -h "output/$file" | cut -f1)" "$hash"
+            done < output/SHA256SUMS.txt
+          } > build-summary.md
+          cat build-summary.md
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: dolomiteexternal-unsigned-IPA
+          path: |
+            output/dolomiteexternal-unsigned.ipa
+            output/SHA256SUMS.txt
+            build-summary.md
+          if-no-files-found: error
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build.log
+          if-no-files-found: ignore
+
+      - name: Write job summary
+        if: always()
+        run: |
+          {
+            echo "## IPA build"
+            echo
+            if [ -f output/SHA256SUMS.txt ]; then
+              cat build-summary.md
+            else
+              echo "Build failed — see the build-log artifact."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  release:
+    name: Publish GitHub release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.release == true)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download IPA
+        uses: actions/download-artifact@v4
+        with:
+          name: dolomiteexternal-unsigned-IPA
+          path: artifact
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifact/dolomiteexternal-unsigned.ipa
+            artifact/SHA256SUMS.txt
+          generate_release_notes: true
+          body: |
+            Unsigned build of **Dolomite External**.
+
+            This IPA is not signed. It needs an enterprise certificate and must be
+            installed with a tool that supports that certificate — SideStore,
+            AltStore, 3uTools and LiveContainer are not supported.
