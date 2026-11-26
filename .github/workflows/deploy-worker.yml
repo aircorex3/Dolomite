@@ -1,0 +1,87 @@
+name: Deploy licence server (Cloudflare Worker)
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Wrangler environment"
+        type: string
+        default: production
+  push:
+    branches: [main]
+    paths:
+      - worker/**
+      - lib/**
+      - public/**
+      - server.js
+      - package.json
+      - .github/workflows/deploy-worker.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dolomite-worker-deploy
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    name: Test, then publish the Worker
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install tooling
+        run: npm install --no-save wrangler@4
+
+      - name: Run the protocol test
+        run: npm test
+
+      - name: Authenticate with Cloudflare
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: npx wrangler whoami
+
+      - name: Publish
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        working-directory: worker
+        run: |
+          set -euo pipefail
+          npx wrangler deploy --minify
+
+      - name: Smoke test the live Worker
+        env:
+          WORKER_URL: ${{ vars.WORKER_URL }}
+        run: |
+          set -euo pipefail
+          if [ -z "${WORKER_URL:-}" ]; then
+            echo "WORKER_URL repository variable is not set — skipping the smoke test."
+            exit 0
+          fi
+          sleep 5
+          curl -fsS "${WORKER_URL}/health"
+          echo
+          curl -fsS -X POST "${WORKER_URL}/api/v1/dolomite/notice" \
+            -H 'Content-Type: application/json' \
+            -H 'x-dolomite-product: dolomite' \
+            | head -c 300
+          echo
+
+      - name: Write job summary
+        run: |
+          {
+            echo "## Worker deployed"
+            echo
+            echo "- Worker: \`${{ vars.WORKER_URL }}\`"
+            echo "- Dashboard: \`${{ vars.WORKER_URL }}/dashboard\`"
+          } >> "$GITHUB_STEP_SUMMARY"
